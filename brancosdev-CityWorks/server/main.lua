@@ -98,11 +98,12 @@ local onDutyPlayers = {}
 local playerXP = {}
 local playerLevel = {}
 local playerLoaded = {}
+local playerIdent = {}
 
 -- XP'den mevcut seviyeyi hesapla
 local function GetLevelFromXP(xp)
     local level = 1
-    for i = 5, 1, -1 do
+    for i = #Config.Levels, 1, -1 do
         if Config.Levels[i] and xp >= Config.Levels[i].XP then
             level = i
             break
@@ -172,31 +173,22 @@ local function GivePlayerMoney(src, amount)
     if not amount or amount <= 0 then return false end
     local account = Config.MoneyAccount or "cash"
 
-    -- Önce ox_inventory kontrol et (QBCore veya Qbox olsa bile ox_inventory kurulu olabilir)
-    if account == "cash" and GetResourceState("ox_inventory") == "started" and exports.ox_inventory then
-        local success = pcall(function()
-            exports.ox_inventory:AddItem(src, 'money', amount)
-        end)
-        if success then return true end
-    end
 
-    -- 1. Qbox
-    if ActiveFramework == "qbox" or (exports.qbx_core and exports.qbx_core:GetPlayer(src)) then
-        local player = exports.qbx_core and exports.qbx_core:GetPlayer(src)
-        if player then
-            if exports.qbx_core.AddMoney then
-                local ok = pcall(function() exports.qbx_core:AddMoney(src, account, amount, "cityworks-task-reward") end)
-                if ok then return true end
-            end
-            if player.Functions and player.Functions.AddMoney then
-                player.Functions.AddMoney(account, amount, "cityworks-task-reward")
-                return true
-            end
+    -- 1. Qbox (nakit para ox_inventory ile zaten senkron, doğrudan hesaba ekle)
+    if ActiveFramework == "qbox" then
+        local ok, res = pcall(function()
+            return exports.qbx_core:AddMoney(src, account, amount, "cityworks-task-reward")
+        end)
+        if ok and res ~= false then return true end
+        local player = exports.qbx_core:GetPlayer(src)
+        if player and player.Functions and player.Functions.AddMoney then
+            player.Functions.AddMoney(account, amount, "cityworks-task-reward")
+            return true
         end
     end
 
     -- 2. QBCore
-    if ActiveFramework == "qbcore" or (exports['qb-core'] and exports['qb-core']:GetCoreObject()) then
+    if ActiveFramework == "qbcore" then
         if not QBCore and exports['qb-core'] then
             pcall(function() QBCore = exports['qb-core']:GetCoreObject() end)
         end
@@ -210,11 +202,11 @@ local function GivePlayerMoney(src, amount)
     end
 
     -- 3. Standalone / ox_inventory
-    if GetResourceState("ox_inventory") == "started" and exports.ox_inventory then
-        local success = pcall(function()
-            exports.ox_inventory:AddItem(src, 'money', amount)
+    if account == "cash" and GetResourceState("ox_inventory") == "started" then
+        local ok, res = pcall(function()
+            return exports.ox_inventory:AddItem(src, 'money', amount)
         end)
-        if success then return true end
+        if ok and res then return true end
     end
 
     print(string.format("^1[CityWorks HATA] Oyuncu %s icin para verilemedi ($%d)! Framework veya envanter uyusmazligi.^0", src, amount))
@@ -224,7 +216,7 @@ end
 -- Oyuncu verilerini veritabanına kaydet
 local function SavePlayer(src)
     if not playerLoaded[src] then return end
-    local identifier = GetIdentifier(src)
+    local identifier = playerIdent[src]
     if not identifier then return end
     
     local xp = playerXP[src] or 0
@@ -258,10 +250,11 @@ local function LoadPlayer(src, cb)
             playerXP[src] = tonumber(result[1].xp) or 0
             playerLevel[src] = tonumber(result[1].level) or 1
             playerLoaded[src] = true
+            playerIdent[src] = identifier
             if cb then cb() end
         else
             -- Kayıt yoksa, yeni oluştur
-            exports.oxmysql:execute('INSERT INTO cityworks_users (identifier, xp, level) VALUES (@identifier, @xp, @level)', {
+            exports.oxmysql:execute('INSERT IGNORE INTO cityworks_users (identifier, xp, level) VALUES (@identifier, @xp, @level)', {
                 ['@identifier'] = identifier,
                 ['@xp'] = 0,
                 ['@level'] = 1
@@ -269,6 +262,7 @@ local function LoadPlayer(src, cb)
                 playerXP[src] = 0
                 playerLevel[src] = 1
                 playerLoaded[src] = true
+                playerIdent[src] = identifier
                 if cb then cb() end
             end)
         end
@@ -278,7 +272,7 @@ end
 local function GetCharacterName(src)
     if not src or src == 0 then return "Saha Personeli" end
     -- Qbox
-    if ActiveFramework == "qbox" and exports.qbx_core then
+    if ActiveFramework == "qbox" then
         local player = exports.qbx_core:GetPlayer(src)
         if player and player.PlayerData and player.PlayerData.charinfo then
             local fn = player.PlayerData.charinfo.firstname or ""
@@ -289,8 +283,8 @@ local function GetCharacterName(src)
         end
     end
     -- QBCore
-    if ActiveFramework == "qbcore" or (exports['qb-core'] and exports['qb-core']:GetCoreObject()) then
-        if not QBCore and exports['qb-core'] then
+    if ActiveFramework == "qbcore" then
+        if not QBCore then
             pcall(function() QBCore = exports['qb-core']:GetCoreObject() end)
         end
         if QBCore then
@@ -351,6 +345,14 @@ AddEventHandler("cityworks:server:taskStarted", function(taskType)
     local src = source
     if not FrameworkReady then return end
 
+    -- Hile koruması: görev geçerli mi ve seviye yeterli mi (server tarafında)
+    local cfg = Config.Tasks[taskType]
+    if not cfg then return end
+    if (playerLevel[src] or 1) < (cfg.RequiredLevel or 1) then
+        print(string.format("^1[CityWorks - GÜVENLİK] Oyuncu %s seviyesi yetmeyen görevi (%s) başlatmaya çalıştı!^0", src, tostring(taskType)))
+        return
+    end
+
     if onDutyPlayers[src] then
         onDutyPlayers[src].activeTask = taskType
         onDutyPlayers[src].startTime = os.time()
@@ -368,8 +370,11 @@ AddEventHandler("cityworks:server:taskCompleted", function(taskType)
         local startTime = onDutyPlayers[src].startTime or 0
         local elapsed = now - startTime
         
-        -- Hile koruması: Görevin en azından mantıklı bir sürede (en az 8 saniye) tamamlanması gerekir
-        if elapsed < 8 then
+        -- Hile koruması: nokta sayısına göre minimum süre (nokta başına 5 sn, en az 15 sn)
+        local tCfg = Config.Tasks[taskType]
+        local pts = (tCfg and tCfg.Locations and tCfg.Locations[1] and #tCfg.Locations[1]) or 3
+        local minTime = math.max(15, pts * 5)
+        if elapsed < minTime then
             print(string.format("^1[CityWorks - GÜVENLİK] Oyuncu %s görevi (%s) imkansız bir sürede (%d saniye) tamamlamaya çalıştı! İşlem reddedildi.^0", src, tostring(taskType), elapsed))
             return
         end
@@ -412,15 +417,28 @@ AddEventHandler("cityworks:server:taskCompleted", function(taskType)
     end
 end)
 
+-- Oyuncunun iş aracı (server tarafında takip)
+local playerVehicles = {}
+
+local function DeletePlayerVehicle(src)
+    local veh = playerVehicles[src]
+    if veh and DoesEntityExist(veh) then
+        DeleteEntity(veh)
+    end
+    playerVehicles[src] = nil
+end
+
 -- Oyuncu oturumunu temizleme fonksiyonu (Çoklu karakter ve çıkış desteği)
 local function CleanupPlayerSession(src)
     if not src then return end
     SavePlayer(src)
+    DeletePlayerVehicle(src)
     
     if onDutyPlayers[src] then onDutyPlayers[src] = nil end
     if playerXP[src] then playerXP[src] = nil end
     if playerLevel[src] then playerLevel[src] = nil end
     if playerLoaded[src] then playerLoaded[src] = nil end
+    playerIdent[src] = nil
 end
 
 -- Oyuncu oyundan çıkarken verilerini kaydet ve belleği temizle
@@ -428,20 +446,114 @@ AddEventHandler("playerDropped", function(reason)
     CleanupPlayerSession(source)
 end)
 
--- QBCore Karakter Değiştirme / Çıkış
-RegisterNetEvent("QBCore:Server:OnPlayerUnload", function()
-    CleanupPlayerSession(source)
+-- Karakter Değiştirme / Çıkış
+-- Not: Bu olaylar server içinden TriggerEvent(..., src) ile tetiklenir; oyuncu ID'si parametre olarak gelir.
+-- RegisterNetEvent yerine AddEventHandler kullanılır ki client bu olayları tetikleyemesin.
+local function OnUnload(src)
+    src = tonumber(src) or tonumber(source)
+    if src and src > 0 then CleanupPlayerSession(src) end
+end
+AddEventHandler("QBCore:Server:OnPlayerUnload", OnUnload)
+AddEventHandler("qbx_core:server:playerLoggedOut", OnUnload)
+AddEventHandler("qbx_core:server:playerUnloaded", OnUnload)
+AddEventHandler("qbx_core:server:onPlayerLogout", OnUnload)
+
+-- ==========================================
+-- İŞ ARACI (SERVER TARAFINDA OLUŞTURMA)
+-- ==========================================
+-- Qbox'ta client'ın oluşturduğu araçlar (entity lockdown / sessionId nedeniyle) qbx_vehiclekeys
+-- tarafından tanınmayabilir. Bu yüzden araç server'da oluşturulur ve anahtar hemen verilir.
+local function GiveQboxKeys(src, veh, tryNo)
+    if GetResourceState("qbx_vehiclekeys") ~= "started" then return end
+    if not veh or not DoesEntityExist(veh) or playerVehicles[src] ~= veh then return end
+    tryNo = tryNo or 1
+
+    pcall(function() exports.qbx_vehiclekeys:GiveKeys(src, veh) end)
+    local okHas, has = pcall(function() return exports.qbx_vehiclekeys:HasKeys(src, veh) end)
+
+    if okHas and has then return end
+
+    -- Oyuncu verisi / sessionId henüz hazır değilse tekrar dene (5 deneme)
+    if tryNo < 5 then
+        SetTimeout(1000, function() GiveQboxKeys(src, veh, tryNo + 1) end)
+    else
+        print(string.format("^1[CityWorks] Oyuncu %s icin anahtar verilemedi (citizenid: %s)^0", src, tostring(GetIdentifier(src))))
+    end
+end
+
+-- Oyuncu kendi iş aracına binmeye çalıştığında anahtarı garantiye al
+RegisterNetEvent("cityworks:server:ensureKeys", function(netId)
+    local src = source
+    local veh = playerVehicles[src]
+    if not veh or not DoesEntityExist(veh) then return end
+    if NetworkGetNetworkIdFromEntity(veh) ~= tonumber(netId) then return end
+    GiveQboxKeys(src, veh)
 end)
 
--- Qbox Karakter Değiştirme / Çıkış (farklı qbx sürümleriyle tam uyumlu)
-RegisterNetEvent("qbx_core:server:playerUnloaded", function()
-    CleanupPlayerSession(source)
+RegisterNetEvent("cityworks:server:spawnVehicle", function(model)
+    local src = source
+    if not FrameworkReady or not onDutyPlayers[src] then
+        TriggerClientEvent("cityworks:client:vehicleSpawned", src, 0)
+        return
+    end
+
+    -- Config'ten doğrula (seviye + görev türü)
+    local vCfg = nil
+    for _, v in ipairs(Config.Vehicles) do
+        if v.Model == model then vCfg = v break end
+    end
+    if not vCfg or (playerLevel[src] or 1) < (vCfg.RequiredLevel or 1) then
+        print(string.format("^1[CityWorks - GÜVENLİK] Oyuncu %s yetkisiz arac (%s) istedi!^0", src, tostring(model)))
+        TriggerClientEvent("cityworks:client:vehicleSpawned", src, 0)
+        return
+    end
+    if vCfg.TaskType and onDutyPlayers[src].activeTask ~= vCfg.TaskType then
+        TriggerClientEvent("cityworks:client:vehicleSpawned", src, 0)
+        return
+    end
+
+    -- Eski araç varsa kaldır
+    DeletePlayerVehicle(src)
+
+    local spawn = Config.VehicleSpawn
+    local veh = CreateVehicleServerSetter(joaat(model), vCfg.Type or "automobile",
+        spawn.coords.x, spawn.coords.y, spawn.coords.z, spawn.heading)
+
+    local t = 0
+    while (not veh or veh == 0 or not DoesEntityExist(veh)) and t < 100 do
+        Wait(50)
+        t = t + 1
+    end
+    if not veh or veh == 0 or not DoesEntityExist(veh) then
+        print(string.format("^1[CityWorks] Arac olusturulamadi: %s^0", tostring(model)))
+        TriggerClientEvent("cityworks:client:vehicleSpawned", src, 0)
+        return
+    end
+
+    local plate = "CW" .. tostring(math.random(1000, 9999))
+    SetVehicleNumberPlateText(veh, plate)
+    SetVehicleDoorsLocked(veh, 1)
+
+    -- Durum bilgileri (ox_fuel ve qbx_vehiclekeys kilit durumu)
+    local state = Entity(veh).state
+    state:set('fuel', 100.0, true)
+    state:set('doorslockstate', 1, true)
+
+    playerVehicles[src] = veh
+
+    -- Qbox anahtarı
+    GiveQboxKeys(src, veh)
+
+    TriggerClientEvent("cityworks:client:vehicleSpawned", src, NetworkGetNetworkIdFromEntity(veh), plate, model)
 end)
-RegisterNetEvent("qbx_core:server:onPlayerLogout", function()
-    CleanupPlayerSession(source)
-end)
-RegisterNetEvent("qbx_core:server:playerLoggedOut", function()
-    CleanupPlayerSession(source)
+
+RegisterNetEvent("cityworks:server:deleteVehicle", function(netId)
+    local src = source
+    local veh = playerVehicles[src]
+    if veh and DoesEntityExist(veh) and NetworkGetNetworkIdFromEntity(veh) == tonumber(netId) then
+        DeleteEntity(veh)
+        playerVehicles[src] = nil
+    end
 end)
 
 exports("GetActiveFramework", function()

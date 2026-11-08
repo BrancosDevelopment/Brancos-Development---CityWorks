@@ -2,6 +2,10 @@
 
 **Brancos Development** tarafından geliştirilen, FiveM için seviye tabanlı, modern arayüzlü legal meslek scripti.
 
+**Açık Kaynak (Open Source):** Script açık kaynak olarak paylaşılmaktadır. Kaynak kodları incelenebilir ve geliştirilebilir.
+
+**Önemli Kullanım Koşulu:** Scriptin orijinal adı olan **brancosdev-CityWorks** ve yapımcı bilgisi olan **Brancos Development** hiçbir şekilde değiştirilemez, kaldırılamaz veya başka bir isimle değiştirilemez.
+
 Oyuncular CityWorks merkezinden görev alır, araçlarını çıkarır, şehirde çöp toplama, yol bakımı ve elektrik arızası görevlerini yaparak XP kazanır ve seviye atlar.
 
 ---
@@ -35,11 +39,13 @@ Oyuncular CityWorks merkezinden görev alır, araçlarını çıkarır, şehirde
 
 1. Klasörü `resources` dizinine atın (`brancosdev-CityWorks`).
 2. `install.sql` dosyasını veritabanınıza aktarın.
-3. `server.cfg` dosyanıza ekleyin (oxmysql'den **sonra**):
-   ```cfg
-   ensure oxmysql
-   ensure brancosdev-CityWorks
-   ```
+3. `server.cfg` dosyanıza ekleyin (oxmysql'den sonra):
+
+```cfg
+ensure oxmysql
+ensure brancosdev-CityWorks
+```
+
 4. `config.lua` dosyasını isteğinize göre düzenleyin.
 5. Sunucuyu yeniden başlatın.
 
@@ -58,8 +64,19 @@ Seviyeler, araçlar, üniformalar, görev noktaları, NPC konumu ve blip ayarlar
 
 ---
 
+## 📜 Açık Kaynak ve Kullanım Koşulları
+
+- Script açık kaynak olarak paylaşılmaktadır.
+- Kaynak kodları incelenebilir ve düzenlenebilir.
+- Orijinal script adı **brancosdev-CityWorks** korunmalıdır.
+- Yapımcı bilgisi **Brancos Development** korunmalıdır.
+- Scriptin adı veya yapımcı bilgisi değiştirilemez ya da kaldırılamaz.
+- Script, farklı bir isim veya yapımcı adı altında yeniden dağıtılamaz.
+
+---
+
 ## 💬 Destek
 
 Soru, öneri ve hata bildirimleri için Discord sunucumuza katılın:
 
-👉 **[discord.gg/8GhcFHmQVr](https://discord.gg/8GhcFHmQVr)**
+👉 **[Brancos Development Discord](https://discord.gg/8GhcFHmQVr)**

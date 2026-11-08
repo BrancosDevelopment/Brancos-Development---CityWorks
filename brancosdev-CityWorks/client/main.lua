@@ -24,6 +24,7 @@ local roadConesPlacedCount = 0
 local requiredRoadCones = 3
 local hasRoadConeInHand = false
 local roadConeInHandProp = nil
+local spawnRequestPending = false
 
 -- Framework Nesneleri
 local QBCore = nil
@@ -375,8 +376,14 @@ Citizen.CreateThread(function()
     if Config.Center.NPC.Enabled then
         local npcHash = GetHashKey(Config.Center.NPC.Model)
         RequestModel(npcHash)
-        while not HasModelLoaded(npcHash) do
+        local nt = 0
+        while not HasModelLoaded(npcHash) and nt < 1000 do
             Citizen.Wait(10)
+            nt = nt + 1
+        end
+        if not HasModelLoaded(npcHash) then
+            print("^1[CityWorks] NPC modeli yuklenemedi: " .. tostring(Config.Center.NPC.Model) .. "^0")
+            return
         end
         
         local cx = Config.Center.NPC.Coords.x
@@ -517,10 +524,7 @@ local function ResetPlayerJobState()
         if currentTask then
             CancelTask()
         end
-        if activeVehicle and DoesEntityExist(activeVehicle) then
-            DeleteEntity(activeVehicle)
-            activeVehicle = nil
-        end
+        DeleteWorkVehicle()
         if isWearingUniform then
             RestoreOutfit()
         end
@@ -562,6 +566,17 @@ Citizen.CreateThread(function()
     end
 end)
 
+-- İş aracını sil (server tarafında oluşturulduğu için server'a da bildir)
+function DeleteWorkVehicle()
+    if activeVehicle and DoesEntityExist(activeVehicle) then
+        local netId = NetworkGetEntityIsNetworked(activeVehicle) and NetworkGetNetworkIdFromEntity(activeVehicle) or nil
+        if netId then TriggerServerEvent("cityworks:server:deleteVehicle", netId) end
+        SetEntityAsMissionEntity(activeVehicle, true, true)
+        DeleteEntity(activeVehicle)
+    end
+    activeVehicle = nil
+end
+
 -- Mesai Durumunu Değiştir
 function ToggleDuty()
     onDuty = not onDuty
@@ -578,10 +593,7 @@ function ToggleDuty()
         Notify("Mesainizi bitirdiniz.", "error")
         CancelTask()
         
-        if activeVehicle and DoesEntityExist(activeVehicle) then
-            DeleteEntity(activeVehicle)
-            activeVehicle = nil
-        end
+        DeleteWorkVehicle()
         
         if isWearingUniform then
             RestoreOutfit()
@@ -830,64 +842,76 @@ RegisterNUICallback("spawnVehicle", function(data, cb)
         return
     end
     
-    RequestModel(hash)
-    while not HasModelLoaded(hash) do
+    if not IsModelInCdimage(hash) or not IsModelAVehicle(hash) then
+        Notify("Araç modeli bulunamadı! Config'i kontrol edin.", "error")
+        cb("ok")
+        return
+    end
+
+    if spawnRequestPending then
+        cb("ok")
+        return
+    end
+    spawnRequestPending = true
+
+    -- Araç SERVER tarafında oluşturulur (Qbox entity lockdown ve qbx_vehiclekeys ile uyumlu)
+    TriggerServerEvent("cityworks:server:spawnVehicle", model)
+    cb("ok")
+end)
+
+RegisterNetEvent("cityworks:client:vehicleSpawned", function(netId, plate, model)
+    spawnRequestPending = false
+    if not netId or netId == 0 then
+        Notify("İş aracı oluşturulamadı! Sunucu konsolunu kontrol edin.", "error")
+        return
+    end
+
+    local t = 0
+    while not NetworkDoesEntityExistWithNetworkId(netId) and t < 300 do
         Citizen.Wait(10)
+        t = t + 1
     end
-    
-    activeVehicle = CreateVehicle(hash, spawn.coords.x, spawn.coords.y, spawn.coords.z, spawn.heading, true, false)
-    SetEntityAsMissionEntity(activeVehicle, true, true)
+    if not NetworkDoesEntityExistWithNetworkId(netId) then
+        Notify("İş aracı yüklenemedi, tekrar deneyin.", "error")
+        return
+    end
+
+    activeVehicle = NetworkGetEntityFromNetworkId(netId)
     SetVehicleEngineOn(activeVehicle, true, true, false)
-    
-    local plate = "CW" .. tostring(math.random(1000, 9999))
-    SetVehicleNumberPlateText(activeVehicle, plate)
-    
-    -- Anahtar Verme Entegrasyonu (Qbox, QBCore, Standalone)
-    if GetResourceState("qbx_vehiclekeys") == "started" and exports['qbx_vehiclekeys'] then
-        pcall(function() exports['qbx_vehiclekeys']:GiveKeys(activeVehicle) end)
-    end
+
+    -- Diğer anahtar sistemleri (Qbox anahtarı server tarafında verildi)
     if GetResourceState("qb-vehiclekeys") == "started" then
         TriggerEvent("vehiclekeys:client:SetOwner", plate)
         TriggerServerEvent("qb-vehiclekeys:server:AcquireVehicleKeys", plate)
     end
-    if GetResourceState("wasabi_carlock") == "started" and exports['wasabi_carlock'] then
+    if GetResourceState("wasabi_carlock") == "started" then
         pcall(function() exports['wasabi_carlock']:GiveKey(plate) end)
     end
-    if GetResourceState("qs-vehiclekeys") == "started" and exports['qs-vehiclekeys'] then
+    if GetResourceState("qs-vehiclekeys") == "started" then
         pcall(function() exports['qs-vehiclekeys']:GiveKeys(plate, model) end)
     end
     if GetResourceState("cd_garage") == "started" then
-        TriggerEvent('cd_garage:AddKeys', exports['cd_garage']:GetPlate(activeVehicle))
+        pcall(function() TriggerEvent('cd_garage:AddKeys', exports['cd_garage']:GetPlate(activeVehicle)) end)
     end
-    -- Her halükarda aracın kapısını açık tut
-    SetVehicleDoorsLocked(activeVehicle, 1)
-    SetVehicleDoorsLockedForAllPlayers(activeVehicle, false)
-    
-    -- Yakıt Entegrasyonu (ox_fuel, ps-fuel, LegacyFuel, native)
-    if GetResourceState("ox_fuel") == "started" and exports['ox_fuel'] then
-        pcall(function() exports['ox_fuel']:setFuel(activeVehicle, 100.0) end)
-    elseif GetResourceState("ps-fuel") == "started" and exports['ps-fuel'] then
+
+    -- Yakıt (ox_fuel server tarafında state bag ile ayarlandı)
+    if GetResourceState("ps-fuel") == "started" then
         pcall(function() exports['ps-fuel']:SetFuel(activeVehicle, 100.0) end)
-    elseif GetResourceState("LegacyFuel") == "started" and exports['LegacyFuel'] then
+    elseif GetResourceState("LegacyFuel") == "started" then
         pcall(function() exports['LegacyFuel']:SetFuel(activeVehicle, 100.0) end)
-    else
-        SetVehicleFuelLevel(activeVehicle, 100.0)
     end
-    
+    SetVehicleFuelLevel(activeVehicle, 100.0)
+
     Notify("İş aracı başarıyla çıkarıldı! Anahtarlar teslim edildi.", "success")
-    SetModelAsNoLongerNeeded(hash)
-    
     SendNUIMessage({
         action = "updateVehicle",
         hasVehicle = true
     })
-    
-    cb("ok")
 end)
 
 RegisterNUICallback("returnVehicle", function(data, cb)
     if activeVehicle and DoesEntityExist(activeVehicle) then
-        DeleteEntity(activeVehicle)
+        DeleteWorkVehicle()
         activeVehicle = nil
         Notify("İş aracı başarıyla teslim edildi.", "success")
         
@@ -937,7 +961,8 @@ RegisterNUICallback("wearUniform", function(data, cb)
     
     if outfitData then
         RequestAnimDict("clothingtie")
-        while not HasAnimDictLoaded("clothingtie") do Citizen.Wait(10) end
+        local at = 0
+        while not HasAnimDictLoaded("clothingtie") and at < 200 do Citizen.Wait(10); at = at + 1 end
         TaskPlayAnim(ped, "clothingtie", "try_tie_neutral_a", 8.0, -8.0, 2500, 51, 0, false, false, false)
         Notify("Kıyafetiniz giydiriliyor...", "info")
         
@@ -1001,8 +1026,23 @@ function StartNewTask(forcedType)
     
     local locs = taskConfig.Locations
     local randomZoneIndex = math.random(1, #locs)
-    local selectedZone = locs[randomZoneIndex]
-    
+    local rawZone = locs[randomZoneIndex]
+
+    -- Koordinatları normalize et: config'te vector4 (x,y,z,heading) veya vector3 olabilir.
+    -- vector3 ile vector4 arasında işlem yapılamadığı için hepsi vector3'e çevrilir.
+    local selectedZone = {}
+    for i, p in ipairs(rawZone) do
+        local c = p.coords
+        local heading = p.heading
+        if type(c) == "vector4" then
+            heading = heading or c.w
+        end
+        selectedZone[i] = {
+            coords = vector3(c.x, c.y, c.z),
+            heading = heading or 0.0
+        }
+    end
+
     currentTask = {
         type = selectedType,
         points = selectedZone,
@@ -1234,8 +1274,9 @@ function ThrowTrashInTruck()
     
     local animDict = "missfbi4prepp1"
     RequestAnimDict(animDict)
-    while not HasAnimDictLoaded(animDict) do Citizen.Wait(10) end
-    
+    local at = 0
+    while not HasAnimDictLoaded(animDict) and at < 200 do Citizen.Wait(10); at = at + 1 end
+
     TaskPlayAnim(ped, animDict, "_bag_throw_garbage_man", 8.0, -8.0, 1500, 0, 0, false, false, false)
     Citizen.Wait(1100)
     
@@ -1715,6 +1756,26 @@ Citizen.CreateThread(function()
             elseif hasRoadConeInHand and not IsEntityPlayingAnim(ped, "anim@heists@box_carry@", "idle", 3) and not isDoingAction then
                 TaskPlayAnim(ped, "anim@heists@box_carry@", "idle", 8.0, -8.0, -1, 49, 0, false, false, false)
             end
+        end
+        Citizen.Wait(sleep)
+    end
+end)
+
+
+-- Qbox: Oyuncu iş aracına binmeye çalışınca anahtarı server'dan tekrar iste (garanti)
+Citizen.CreateThread(function()
+    local lastAsk = 0
+    while true do
+        local sleep = 500
+        if activeVehicle and DoesEntityExist(activeVehicle) and GetResourceState("qbx_vehiclekeys") == "started" then
+            local ped = PlayerPedId()
+            local entering = GetVehiclePedIsTryingToEnter(ped)
+            local inVeh = GetVehiclePedIsIn(ped, false)
+            if (entering == activeVehicle or inVeh == activeVehicle) and GetGameTimer() - lastAsk > 3000 then
+                lastAsk = GetGameTimer()
+                TriggerServerEvent("cityworks:server:ensureKeys", NetworkGetNetworkIdFromEntity(activeVehicle))
+            end
+            sleep = 100
         end
         Citizen.Wait(sleep)
     end
