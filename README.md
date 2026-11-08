@@ -81,4 +81,4 @@ Seviyeler, araçlar, üniformalar, görev noktaları, NPC konumu ve blip ayarlar
 
 Soru, öneri ve hata bildirimleri için Discord sunucumuza katılın:
 
-👉 **[Brancos Development Discord](https://discord.gg/8GhcFHmQVr)**
+👉 **(https://discord.gg/8GhcFHmQVr)**
